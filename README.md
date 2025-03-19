@@ -30,7 +30,7 @@ npm run build
 
 4. Configure the MCP server in your settings file:
 
-For VSCode Claude Extension (`cline_mcp_settings.json`):
+For VSCode Cline Extension (`cline_mcp_settings.json`):
 ```json
 {
   "mcpServers": {
