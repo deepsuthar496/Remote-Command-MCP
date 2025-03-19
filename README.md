@@ -14,7 +14,7 @@ A Model Context Protocol (MCP) server that enables remote command execution acro
 
 1. Clone the repository:
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/deepsuthar496/Remote-Command-MCP
 cd remote-command-server
 ```
 
