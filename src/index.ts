@@ -7,12 +7,13 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import { platform } from 'os';
 
 const execPromise = promisify(exec);
 const isWindows = platform() === 'win32';
+const COMMAND_TIMEOUT = 30000; // 30 seconds timeout
 
 interface ExecCommandArgs {
   command: string;
@@ -24,6 +25,35 @@ const isValidExecArgs = (args: any): args is ExecCommandArgs =>
   args !== null &&
   typeof args.command === 'string' &&
   (args.cwd === undefined || typeof args.cwd === 'string');
+
+// Basic command sanitization
+const sanitizeCommand = (command: string): string => {
+  // Remove any null bytes that could be used for command injection
+  command = command.replace(/\0/g, '');
+  
+  // Only remove malicious command chaining while preserving pipes
+  if (isWindows) {
+    command = command.replace(/\|\|/g, '');  // Remove OR operator but keep pipes
+  } else {
+    command = command.replace(/;/g, '').replace(/\|\|/g, '');  // Remove semicolon and OR operator
+  }
+  
+  return command;
+};
+
+// Normalize command for cross-platform compatibility
+const normalizeCommand = (command: string): string => {
+  let normalizedCmd = command;
+
+  // Handle common cross-platform commands
+  if (normalizedCmd.startsWith('ls ')) {
+    normalizedCmd = isWindows ? normalizedCmd.replace(/^ls\s+/, 'dir ') : normalizedCmd;
+  } else if (normalizedCmd.startsWith('dir ')) {
+    normalizedCmd = isWindows ? normalizedCmd : normalizedCmd.replace(/^dir\s+/, 'ls ');
+  }
+
+  return normalizedCmd;
+};
 
 class RemoteCommandServer {
   private server: Server;
@@ -48,6 +78,69 @@ class RemoteCommandServer {
     process.on('SIGINT', async () => {
       await this.server.close();
       process.exit(0);
+    });
+  }
+
+  private executeCommand(command: string, cwd?: string): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      let timeout: NodeJS.Timeout | null = null;
+
+      // Set timeout
+      timeout = setTimeout(() => {
+        reject(new Error(`Command timed out after ${COMMAND_TIMEOUT/1000} seconds`));
+      }, COMMAND_TIMEOUT);
+
+      // Use exec for commands with pipes, spawn for simple commands
+      if (command.includes('|')) {
+        execPromise(command, {
+          cwd,
+          shell: isWindows ? 'cmd.exe' : '/bin/sh',
+          timeout: COMMAND_TIMEOUT,
+          windowsHide: true
+        }).then(({ stdout, stderr }) => {
+          if (timeout) clearTimeout(timeout);
+          resolve({ stdout, stderr });
+        }).catch((error) => {
+          if (timeout) clearTimeout(timeout);
+          reject(error);
+        });
+      } else {
+        const shell = isWindows ? 'cmd.exe' : '/bin/sh';
+        const args = isWindows ? ['/c', command] : ['-c', command];
+        
+        console.error(`Executing command: ${command} (${shell} ${args.join(' ')})`);  // Debug log
+
+        const child = spawn(shell, args, {
+          cwd,
+          shell: true,
+          windowsHide: true
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        child.stdout.on('data', (data) => {
+          stdout += data.toString();
+        });
+
+        child.stderr.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        child.on('error', (error) => {
+          if (timeout) clearTimeout(timeout);
+          reject(error);
+        });
+
+        child.on('close', (code) => {
+          if (timeout) clearTimeout(timeout);
+          if (code === 0 || stdout.length > 0) { // Consider command successful if there's output even with non-zero exit code
+            resolve({ stdout, stderr });
+          } else {
+            reject(new Error(`Command failed with exit code ${code}${stderr ? ': ' + stderr : ''}`));
+          }
+        });
+      }
     });
   }
 
@@ -91,45 +184,49 @@ class RemoteCommandServer {
       }
 
       try {
-        // Normalize command for the current platform
-        let command = request.params.arguments.command;
+        // Sanitize and normalize the command
+        const sanitizedCmd = sanitizeCommand(request.params.arguments.command);
+        const normalizedCmd = normalizeCommand(sanitizedCmd);
+
+        const { stdout, stderr } = await this.executeCommand(
+          normalizedCmd,
+          request.params.arguments.cwd
+        );
+
+        // Combine stdout and stderr in the response
+        const output = [];
         
-        // Handle common cross-platform commands
-        if (command.startsWith('ls ')) {
-          command = isWindows ? command.replace('ls', 'dir') : command;
-        } else if (command.startsWith('dir ')) {
-          command = isWindows ? command : command.replace('dir', 'ls');
-        } else if (command.includes('|')) {
-          // Handle pipe operators
-          command = isWindows 
-            ? command 
-            : command.replace(/\|/g, ' | '); // Ensure proper spacing for Unix pipes
+        if (stdout.trim()) {
+          output.push(stdout.trim());
         }
-
-        const { stdout, stderr } = await execPromise(command, {
-          cwd: request.params.arguments.cwd,
-          shell: isWindows ? 'cmd.exe' : '/bin/sh'
-        });
-
-        let output = stdout;
-        if (stderr) {
-          output += '\nSTDERR:\n' + stderr;
+        
+        if (stderr.trim()) {
+          output.push('STDERR:', stderr.trim());
         }
 
         return {
           content: [
             {
               type: 'text',
-              text: output,
+              text: output.join('\n') || 'Command completed successfully (no output)',
             },
           ],
         };
       } catch (error: any) {
+        // Enhanced error handling with more details
+        const errorMessage = [
+          'Command execution error:',
+          `Command: ${request.params.arguments.command}`,
+          `Error: ${error?.message || 'Unknown error'}`
+        ];
+
+        console.error('Command failed:', error);  // Debug log
+
         return {
           content: [
             {
               type: 'text',
-              text: `Command execution error: ${error?.message || 'Unknown error'}`,
+              text: errorMessage.join('\n'),
             },
           ],
           isError: true,
