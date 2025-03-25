@@ -30,6 +30,21 @@ npm run build
 
 4. Configure the MCP server in your settings file:
 
+For Claude Desktop (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "remote-command": {
+      "command": "node",
+      "args": ["path/to/remote-command-server/build/index.js"],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+
 For VSCode Cline Extension (`cline_mcp_settings.json`):
 ```json
 {
